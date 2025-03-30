@@ -107,6 +107,8 @@ class ResNetBase(Model):
         bn_momentum=0.1,
     ):
         downsample = None
+        # 如果 stride != 1 或者当前层的 inplanes（输入通道数）与下一层的输出通道数（planes * block.expansion）不一致，
+        # 就需要调整。
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
                 conv(

@@ -39,9 +39,9 @@ class Res16UNetBase(ResNetBase):
         # Output of the first conv concated to conv6
         self.inplanes = self.INIT_DIM
         self.conv0p1s1 = conv(
-            in_channels,
-            self.inplanes,
-            kernel_size=space_n_time_m(config.conv1_kernel_size, 1),
+            in_channels,  # 6
+            self.inplanes,  # 32
+            kernel_size=space_n_time_m(config.conv1_kernel_size, 1),  # 5
             stride=1,
             dilation=1,
             conv_type=self.NON_BLOCK_CONV_TYPE,
@@ -49,14 +49,14 @@ class Res16UNetBase(ResNetBase):
         )
 
         self.bn0 = get_norm(
-            self.NORM_TYPE, self.inplanes, D, bn_momentum=bn_momentum
+            self.NORM_TYPE, self.inplanes, D, bn_momentum=bn_momentum  #
         )
 
         self.conv1p1s2 = conv(
-            self.inplanes,
-            self.inplanes,
-            kernel_size=space_n_time_m(2, 1),
-            stride=space_n_time_m(2, 1),
+            self.inplanes,  # 32
+            self.inplanes,  # 32
+            kernel_size=space_n_time_m(2, 1),  # 2
+            stride=space_n_time_m(2, 1),  # 2
             dilation=1,
             conv_type=self.NON_BLOCK_CONV_TYPE,
             D=D,
@@ -66,16 +66,16 @@ class Res16UNetBase(ResNetBase):
         )
         self.block1 = self._make_layer(
             self.BLOCK,
-            self.PLANES[0],
-            self.LAYERS[0],
+            self.PLANES[0],  # 32
+            self.LAYERS[0],  # 2
             dilation=dilations[0],
             norm_type=self.NORM_TYPE,
             bn_momentum=bn_momentum,
         )
 
         self.conv2p2s2 = conv(
-            self.inplanes,
-            self.inplanes,
+            self.inplanes,  # 64
+            self.inplanes,  # 64
             kernel_size=space_n_time_m(2, 1),
             stride=space_n_time_m(2, 1),
             dilation=1,

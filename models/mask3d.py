@@ -16,30 +16,55 @@ from torch.cuda.amp import autocast
 class Mask3D(nn.Module):
     def __init__(
         self,
+        # 配置文件，包含了模型的配置信息
         config,
+        # 隐藏层的维度
         hidden_dim,
+        # 实例查询的数量，用于实例分割任务中生成查询向量的数量。
         num_queries,
+        # Transformer解码器的多头注意力机制的头数。
         num_heads,
+        # 前馈网络的维度
         dim_feedforward,
+        # 采样的大小
         sample_sizes,
+        # 是否使用共享的解码器
         shared_decoder,
+        # 类别的数量
         num_classes,
+        # 解码器的数量。
         num_decoders,
+        # dropout概率
         dropout,
+        # 是否使用预归一化（在Transformer中，通常指输入是否预先归一化）。
         pre_norm,
+        # 位置编码的类型
         positional_encoding_type,
+        # 是否使用非参数化查询
         non_parametric_queries,
+        # 是否在训练时使用分段数据
         train_on_segments,
+        # 是否对位置编码进行归一化
         normalize_pos_enc,
+        # 是否使用级别嵌入（用于不同层级的处理）
         use_level_embed,
+        # 散射方式（例如，mean或max），用于处理点云数据的聚合
         scatter_type,
+        # 特征层级列表
         hlevels,
+        # 是否使用非参数化特征
         use_np_features,
+        # 体素大小，用于对点云数据进行体素化
         voxel_size,
+        # 最大采样大小
         max_sample_size,
+        # 是否使用随机查询
         random_queries,
+        # 高斯缩放因子
         gauss_scale,
+        # 是否使用两种类型的随机查询
         random_query_both,
+        # 是否使用随机正态分布
         random_normal,
     ):
         super().__init__()
@@ -155,7 +180,7 @@ class Mask3D(nn.Module):
             )
         else:
             assert False, "pos enc type not known"
-
+        # 创建了一个 3D 的平均池化层 (MinkowskiAvgPooling)，用于稀疏张量的下采样。
         self.pooling = MinkowskiAvgPooling(
             kernel_size=2, stride=2, dimension=3
         )
@@ -213,20 +238,26 @@ class Mask3D(nn.Module):
         self.decoder_norm = nn.LayerNorm(hidden_dim)
 
     def get_pos_encs(self, coords):
+        # 用于计算坐标的多层位置编码，每一层的编码会根据该层的坐标范围生成，并用于后续的模型层级特征处理。
         pos_encodings_pcd = []
 
         for i in range(len(coords)):
             pos_encodings_pcd.append([[]])
+            # 遍历 coords[i].decomposed_features 中的每个批次坐标数据 coords_batch，
+            # 计算该批次的最小值 scene_min 和最大值 scene_max。它们的维度扩展为 [1, ...] 以便后续操作。
+            # scene_min 和 scene_max 用来定义该批次坐标的范围，将在位置编码中用作 input_range 参数。
             for coords_batch in coords[i].decomposed_features:
                 scene_min = coords_batch.min(dim=0)[0][None, ...]
                 scene_max = coords_batch.max(dim=0)[0][None, ...]
 
+                # self.pos_enc 函数计算位置编码，input_range 参数为 [scene_min, scene_max]，即以该批次坐标的最小值和最大值为范围
                 with autocast(enabled=False):
                     tmp = self.pos_enc(
                         coords_batch[None, ...].float(),
                         input_range=[scene_min, scene_max],
                     )
-
+                    # tmp.squeeze(0) 移除第一维（批次维度），然后通过 .permute((1, 0)) 转置，使编码形状符合后续处理的需求。
+                    # 将转置后的结果添加到 pos_encodings_pcd 对应批次的编码列表中。
                 pos_encodings_pcd[-1][0].append(tmp.squeeze(0).permute((1, 0)))
 
         return pos_encodings_pcd
@@ -234,11 +265,17 @@ class Mask3D(nn.Module):
     def forward(
         self, x, point2segment=None, raw_coordinates=None, is_eval=False
     ):
+        # 主体特征提取
+        # 通过 backbone 计算输入 x 的点云特征 pcd_features 以及辅助特征 aux。backbone 是一个多层神经网络，用于特征提取。
         pcd_features, aux = self.backbone(x)
 
         batch_size = len(x.decomposed_coordinates)
 
+        # 坐标和池化
+        # 这里使用了辅助特征的坐标信息 aux，并通过池化操作将不同层级的坐标按大小顺序排列。
+        # pooling 操作对坐标进行下采样，以便在多分辨率下进行特征融合
         with torch.no_grad():
+            # 创建初始稀疏张量 coordinates
             coordinates = me.SparseTensor(
                 features=raw_coordinates,
                 coordinate_manager=aux[-1].coordinate_manager,
@@ -246,12 +283,14 @@ class Mask3D(nn.Module):
                 device=aux[-1].device,
             )
 
+            # 构建坐标列表 coords
             coords = [coordinates]
             for _ in reversed(range(len(aux) - 1)):
                 coords.append(self.pooling(coords[-1]))
 
             coords.reverse()
 
+        # 位置编码和掩码特征提取
         pos_encodings_pcd = self.get_pos_encs(coords)
         mask_features = self.mask_features_head(pcd_features)
 
@@ -266,7 +305,10 @@ class Mask3D(nn.Module):
 
         sampled_coords = None
 
+        # 非参数化查询
         if self.non_parametric_queries:
+            # 使用“最远点采样”（FPS）来选择代表性的点作为查询点，
+            # 这种方式可以使得查询点在空间上分布均匀，有助于捕捉到点云中较广泛的空间信息。
             fps_idx = [
                 furthest_point_sample(
                     x.decomposed_coordinates[i][None, ...].float(),
@@ -302,6 +344,7 @@ class Mask3D(nn.Module):
             )  # Batch, Dim, queries
             query_pos = self.query_projection(query_pos)
 
+            # 非参数化特征来生成查询特征 queries
             if not self.use_np_features:
                 queries = torch.zeros_like(query_pos).permute((0, 2, 1))
             else:
@@ -316,6 +359,7 @@ class Mask3D(nn.Module):
                 queries = self.np_feature_projection(queries)
             query_pos = query_pos.permute((2, 0, 1))
         elif self.random_queries:
+            # 随机query_pos
             query_pos = (
                 torch.rand(
                     batch_size,
@@ -328,6 +372,7 @@ class Mask3D(nn.Module):
 
             queries = torch.zeros_like(query_pos).permute((0, 2, 1))
             query_pos = query_pos.permute((2, 0, 1))
+        # 随机query_pos和queries
         elif self.random_query_both:
             if not self.random_normal:
                 query_pos_feat = (
@@ -352,7 +397,7 @@ class Mask3D(nn.Module):
                 (2, 0, 1)
             )
         else:
-            # PARAMETRIC QUERIES
+            # PARAMETRIC QUERIES 参数化查询
             queries = self.query_feat.weight.unsqueeze(0).repeat(
                 batch_size, 1, 1
             )
@@ -387,7 +432,8 @@ class Mask3D(nn.Module):
                         point2segment=None,
                         coords=coords,
                     )
-
+                # 获取当前 aux 和 attn_mask 的分解特征，
+                # decomposed_aux 是当前层级的特征，decomposed_attn 是该层的注意力掩码
                 decomposed_aux = aux[hlevel].decomposed_features
                 decomposed_attn = attn_mask.decomposed_features
 
@@ -404,7 +450,7 @@ class Mask3D(nn.Module):
                     curr_sample_size = min(
                         curr_sample_size, self.sample_sizes[hlevel]
                     )
-
+                # 初始化 rand_idx 和 mask_idx，分别用于存储采样索引和掩码索引
                 rand_idx = []
                 mask_idx = []
                 for k in range(len(decomposed_aux)):
@@ -440,24 +486,24 @@ class Mask3D(nn.Module):
                             dtype=torch.bool,
                             device=queries.device,
                         )  # attend to all
-
+                    # 将生成的索引 idx 和掩码 midx 添加到 rand_idx 和 mask_idx
                     rand_idx.append(idx)
                     mask_idx.append(midx)
-
+                # 使用 rand_idx 采样 decomposed_aux，生成批处理的点云特征 batched_aux
                 batched_aux = torch.stack(
                     [
                         decomposed_aux[k][rand_idx[k], :]
                         for k in range(len(rand_idx))
                     ]
                 )
-
+                # 使用 rand_idx 采样 decomposed_attn，生成批处理的注意力掩码 batched_attn。
                 batched_attn = torch.stack(
                     [
                         decomposed_attn[k][rand_idx[k], :]
                         for k in range(len(rand_idx))
                     ]
                 )
-
+                # 生成 batched_pos_enc，它包含采样的点云位置编码
                 batched_pos_enc = torch.stack(
                     [
                         pos_encodings_pcd[hlevel][0][k][rand_idx[k], :]
@@ -468,10 +514,10 @@ class Mask3D(nn.Module):
                 batched_attn.permute((0, 2, 1))[
                     batched_attn.sum(1) == rand_idx[0].shape[0]
                 ] = False
-
+                # 将 m（掩码）堆叠，更新 batched_attn 掩码，使填充部分的点在注意力计算中被忽略。
                 m = torch.stack(mask_idx)
                 batched_attn = torch.logical_or(batched_attn, m[..., None])
-
+                # 使用线性变换 lin_squeeze 将 batched_aux 特征降维到 src_pcd。如果使用层级嵌入，则加上相应权重。
                 src_pcd = self.lin_squeeze[decoder_counter][i](
                     batched_aux.permute((1, 0, 2))
                 )
@@ -550,7 +596,9 @@ class Mask3D(nn.Module):
         coords=None,
     ):
         query_feat = self.decoder_norm(query_feat)
+        # 使用 mask_embed_head 生成掩码嵌入，该嵌入与掩码特征相结合产生掩码
         mask_embed = self.mask_embed_head(query_feat)
+        # 该嵌入表示类别预测结果
         outputs_class = self.class_embed_head(query_feat)
 
         output_masks = []
@@ -561,11 +609,12 @@ class Mask3D(nn.Module):
                 output_segments.append(mask_segments[i] @ mask_embed[i].T)
                 output_masks.append(output_segments[-1][point2segment[i]])
         else:
+            # 直接将 mask_features.decomposed_features 与 mask_embed 进行矩阵乘法得到 output_masks。
             for i in range(mask_features.C[-1, 0] + 1):
                 output_masks.append(
                     mask_features.decomposed_features[i] @ mask_embed[i].T
                 )
-
+        # 将 output_masks 转为 SparseTensor 格式，方便后续的稀疏处理。
         output_masks = torch.cat(output_masks)
         outputs_mask = me.SparseTensor(
             features=output_masks,
@@ -576,6 +625,7 @@ class Mask3D(nn.Module):
         if ret_attn_mask:
             attn_mask = outputs_mask
             for _ in range(num_pooling_steps):
+                # 池化以生成更粗的掩码
                 attn_mask = self.pooling(attn_mask.float())
 
             attn_mask = me.SparseTensor(
